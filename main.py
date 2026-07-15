@@ -1,57 +1,36 @@
-import os
-import sys
-from dotenv import load_dotenv
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
+from agents.corporate_agent import CorporateAgent
+from agents.travel_agent import TravelAgent
 
-# Load environment variables from a .env file
-load_dotenv()
 
-# Configuration Constants (Reads from .env, falls back to defaults if not found)
-AZURE_AI_ENDPOINT = os.getenv(
-    "AZURE_AI_PROJECT_ENDPOINT",
-    "https://roman-foundry-poc.services.ai.azure.com/api/projects/roman-agent-evaluation"
-)
-AGENT_NAME = os.getenv("AZURE_AGENT_NAME", "Roman-Corporate-Bot")
-AGENT_VERSION = os.getenv("AZURE_AGENT_VERSION", "2")
+def main():
+    print("=" * 55)
+    print("  Azure AI Foundry — Multi-Agent Demo")
+    print("=" * 55)
 
-def run_agent_official_way():
-    # Validate configuration before executing
-    if not AZURE_AI_ENDPOINT or not AGENT_NAME:
-        print("Error: Missing configuration parameters. Please check your constants or .env file.")
-        sys.exit(1)
+    corporate = CorporateAgent().create()
+    travel = TravelAgent().create()
 
-    print("Authenticating with Azure AI Foundry...")
     try:
-        project_client = AIProjectClient(
-            endpoint=AZURE_AI_ENDPOINT,
-            credential=DefaultAzureCredential(),
-        )
+        scenarios = [
+            (travel, "What's the weather in Tel Aviv? I'm flying there next week."),
+            (corporate, "How much is 15% tip on 850 shekels?"),
+            (corporate, "What's the shuttle schedule?"),
+            (corporate, "I spent 200 shekels on lunch. What's the expense procedure and how much is that in dollars (rate 0.27)?"),
+            (travel, "Should I pack a jacket for Moscow?"),
+        ]
 
-        print("Initializing OpenAI-compatible runtime client...")
-        openai_client = project_client.get_openai_client()
+        for agent, question in scenarios:
+            print(f"\n{'─' * 55}")
+            print(f"🤖 Agent: {agent.name}")
+            print(f"👤 User: {question}")
+            response = agent.ask(question)
+            print(f"💬 Response: {response}")
 
-        user_query = "What is the corporate shuttle schedule for Route 101 tomorrow?"
-        print(f"\nUser: {user_query}")
+    finally:
+        corporate.cleanup()
+        travel.cleanup()
+        print("\n✓ All agents deleted. Done.")
 
-        print("Sending request via Responses API...")
-        # Fix: Passing user_query directly as a string resolves the PyCharm type warning,
-        # as the SDK expects a primitive 'str' or specific typed objects rather than a raw list of dicts.
-        response = openai_client.responses.create(
-            input=user_query,
-            extra_body={
-                "agent_reference": {
-                    "name": AGENT_NAME,
-                    "version": AGENT_VERSION,
-                    "type": "agent_reference"
-                }
-            },
-        )
-
-        print(f"\nAgent Response:\n{response.output_text}")
-
-    except Exception as e:
-        print(f"\nAn error occurred during execution: {e}")
 
 if __name__ == "__main__":
-    run_agent_official_way()
+    main()
