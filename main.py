@@ -27,9 +27,10 @@ def main():
             print(f"💬 Response: {response}")
 
     finally:
-        corporate.cleanup()
-        travel.cleanup()
-        print("\n✓ All agents deleted. Done.")
+        # corporate.cleanup()
+        # travel.cleanup()
+        # print("\n✓ All agents deleted. Done.")
+        print(f"\n✓ Agents created. Corporate: {corporate.agent.id}, Travel: {travel.agent.id}")
 
 
 if __name__ == "__main__":

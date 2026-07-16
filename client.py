@@ -11,7 +11,7 @@ _client: AgentsClient | None = None
 _toolset: ToolSet | None = None
 
 
-def get_agents_client() -> AgentsClient:
+def get_agents_client() -> AgentsClient | None:
     global _client
     if _client is None:
         _client = AgentsClient(
@@ -21,7 +21,7 @@ def get_agents_client() -> AgentsClient:
     return _client
 
 
-def get_toolset() -> ToolSet:
+def get_toolset() -> ToolSet | None:
     """Shared toolset with all registered functions for auto function calls."""
     global _toolset
     if _toolset is None:
