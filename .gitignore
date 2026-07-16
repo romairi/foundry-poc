@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SmartLoan Agent runtime cache (agent/vector-store IDs created on Azure AI Foundry)
+.agents_cache.json

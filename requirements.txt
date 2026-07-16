@@ -1,4 +1,8 @@
+azure-ai-agents
 azure-ai-projects
 azure-identity
-python-dotenv
 azure-core
+python-dotenv
+pandas
+openpyxl
+python-telegram-bot>=20.0
