@@ -1,28 +1,15 @@
 """
 agents_config.py
 
-Multi-agent configuration for the SmartLoan system, built on the Azure AI
-Agent SDK (`azure-ai-agents`).
+Multi-model configuration for the SmartLoan system, built on the Azure AI
+Agent SDK and the Foundry OpenAI-compatible Responses API.
 
-Three agents are created on the Azure AI Foundry project, each on the model
-best suited to its job (mixing vendors from the Foundry model catalog):
+Three deployed models are orchestrated sequentially:
 
-1. Orchestrator Agent (the "brain" + the math) - model: gpt-5.6-sol (OpenAI)
-   The only agent that talks to the user. It has two local Function Tools:
-   `get_customer_financials` and `ask_policy_agent` (the latter forwards the
-   question to the Policy Agent below and returns its answer). It does the
-   DTI/LTV/credit-tier math itself (needs a strong reasoning + tool-calling
-   model).
-
-   NOTE: we deliberately do NOT use the SDK's `ConnectedAgentTool` here. In
-   testing against this project, ANY agent-to-agent call made through
-   `ConnectedAgentTool` failed immediately with a generic
-   `{"code": "server_error", "message": "Sorry, something went wrong."}` —
-   reproduced even between two agents on the exact same OpenAI model, so it's
-   a platform/project-level limitation, not a model or code issue. Calling the
-   Policy Agent as a plain local Function Tool (same mechanism as
-   `get_customer_financials`) sidesteps that entirely and works with any
-   model/vendor combination.
+1. Orchestrator & Scoring - gpt-5.6-sol (OpenAI)
+   Invoked directly through the Responses API without sampling parameters.
+   This avoids the Prompt Agent service's implicit `top_p=1.0`, which this
+   deployment rejects.
 
 2. Policy Agent (RAG) - model: Cohere-command-a-plus-05-2026 (Cohere)
    Attached to a Vector Store built from `bank_underwriting_policy_2026.pdf`.
@@ -31,16 +18,15 @@ best suited to its job (mixing vendors from the Foundry model catalog):
    Requires tool-calling support (needed to invoke File Search).
 
 3. Fast Router (greeting / FAQ triage) - model: DeepSeek-V4-Flash (DeepSeek)
-   A cheap, fast first point of contact for `telegram_bot.py`. It classifies
+   A cheap, fast first point of contact for the Streamlit app. It classifies
    an incoming message as either answerable directly (small talk, generic
    "how does this bot work" questions) or as needing the full Orchestrator
    pipeline. This model does NOT support tool calling, so the Fast Router
    has no tools - it only returns a small JSON verdict, never touches
    customer data or policy numbers itself.
 
-Agent IDs are cached locally in `.agents_cache.json` so that restarting the
-bot re-uses existing agents/vector stores instead of recreating them (and
-spamming your Foundry project) on every run.
+Policy and router agent IDs are cached in `.agents_cache.json` so restarts
+reuse the existing agents and vector store.
 """
 from __future__ import annotations
 
@@ -57,19 +43,33 @@ from azure.ai.agents.models import (
     Agent,
     FilePurpose,
     FileSearchTool,
-    FunctionTool,
 )
+from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
-
-from mock_database import get_customer_financials
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- Configuration -----------------------------------------------------------
 
-ENDPOINT = os.getenv("AZURE_AI_PROJECT_ENDPOINT")
+def _endpoint_from_connection_string(connection_string: Optional[str]) -> Optional[str]:
+    """Extract an endpoint from legacy Foundry connection-string formats."""
+    if not connection_string:
+        return None
+    value = connection_string.strip().strip('"')
+    if value.startswith(("https://", "http://")):
+        return value
+    for item in value.split(";"):
+        key, separator, item_value = item.partition("=")
+        if separator and key.strip().lower() in {"endpoint", "projectendpoint"}:
+            return item_value.strip()
+    return None
+
+
+ENDPOINT = os.getenv("AZURE_AI_PROJECT_ENDPOINT") or _endpoint_from_connection_string(
+    os.getenv("AZURE_AI_PROJECT_CONNECTION_STRING")
+)
 
 # Each agent runs on its own deployment name (each must already be deployed in
 # your Foundry project). Falls back to the legacy single MODEL_DEPLOYMENT_NAME
@@ -84,7 +84,6 @@ CACHE_PATH = Path(__file__).parent / ".agents_cache.json"
 
 POLICY_AGENT_NAME = "policy_agent"
 FAST_ROUTER_AGENT_NAME = "fast_router_agent"
-ORCHESTRATOR_AGENT_NAME = "orchestrator_agent"
 
 POLICY_AGENT_INSTRUCTIONS = """You are the Policy Agent for H-Bank's SmartLoan system.
 
@@ -103,23 +102,19 @@ Rules:
 - Keep answers short, structured, and easy for another agent to parse and use in a calculation.
 """
 
-ORCHESTRATOR_INSTRUCTIONS = """You are "SmartLoan Assistant", the friendly Telegram-facing loan
-officer AND financial analyst for H-Bank. You coordinate the whole system AND do the math
-yourself, and you always answer in the SAME language the user wrote in (Hebrew, Russian or
-English).
+ORCHESTRATOR_INSTRUCTIONS = """You are "SmartLoan Assistant", the friendly web-based loan officer
+AND financial analyst for H-Bank. You coordinate the whole system AND do the math yourself,
+and you always answer in the SAME language the user wrote in (Hebrew, Russian or English).
 
 You have two tools:
-- get_customer_financials: fetch the user's financial profile from the bank database using
-  their Telegram ID. ALWAYS call this first when discussing a specific application.
+- get_customer_financials: fetch a selected financial profile from the mock bank database.
 - ask_policy_agent: ask about H-Bank's underwriting rules (DTI/LTV limits, credit score tiers,
-  the High-Tech Exception). ALWAYS call this to learn the exact limits BEFORE doing any math —
+  the High-Tech Exception). Use it to learn exact limits BEFORE doing any math —
   never rely on memorized thresholds, since bank policy can change.
 
 Standard workflow for a loan question:
-1. Call get_customer_financials with the user's Telegram ID.
-   - If status is "unknown_customer", ask the user to provide their details manually (age,
-     profession, monthly net income, existing debts, credit score, loan type, requested
-     amount, property value, down payment) before continuing.
+1. Use the authoritative selected-client record supplied by the Streamlit application. Only
+   call get_customer_financials when the application has not already supplied that record.
 2. Call ask_policy_agent to retrieve the DTI limit, LTV limit and credit score tiers that
    apply. If the customer's profession looks tech-related (e.g. Software Engineer, Developer,
    Data Scientist) and their income is above 20,000 ₪, also ask about the High-Tech Exception.
@@ -143,7 +138,7 @@ If the user is just chatting or asking general questions, answer helpfully witho
 full workflow. Never invent numbers — only use what the tools return.
 """
 
-FAST_ROUTER_INSTRUCTIONS = """You are the Fast Router for H-Bank's SmartLoan Telegram bot: a
+FAST_ROUTER_INSTRUCTIONS = """You are the Fast Router for H-Bank's SmartLoan web application: a
 lightweight first point of contact whose only job is to triage incoming messages FAST and
 cheaply, before they might reach the much more expensive Orchestrator pipeline.
 
@@ -172,7 +167,7 @@ When in doubt, always choose "orchestrator" rather than guessing or making up nu
 def get_agents_client() -> AgentsClient:
     if not ENDPOINT:
         raise RuntimeError(
-            "AZURE_AI_PROJECT_ENDPOINT is not set. Add it to your .env file."
+            "Set AZURE_AI_PROJECT_ENDPOINT or AZURE_AI_PROJECT_CONNECTION_STRING in .env."
         )
     return AgentsClient(endpoint=ENDPOINT, credential=DefaultAzureCredential())
 
@@ -256,6 +251,7 @@ def _ensure_fast_router_agent(client: AgentsClient, cache: dict) -> Agent:
 # function (registered as a Function Tool) knows which client/agent to forward
 # questions to. See module docstring for why this replaces ConnectedAgentTool.
 _policy_agent_ref: dict = {"client": None, "agent_id": None}
+_openai_responses_client: Any = None
 
 
 def ask_policy_agent(question: str) -> str:
@@ -295,31 +291,23 @@ def ask_policy_agent(question: str) -> str:
         return f"Policy Agent is temporarily unavailable ({exc})."
 
 
-def _ensure_orchestrator_agent(client: AgentsClient, cache: dict, policy_agent: Agent) -> Agent:
-    _policy_agent_ref["client"] = client
-    _policy_agent_ref["agent_id"] = policy_agent.id
+def ask_orchestrator(message: str) -> str:
+    """Call the GPT deployment directly, avoiding incompatible Prompt Agent defaults."""
+    global _openai_responses_client
+    if _openai_responses_client is None:
+        project_client = AIProjectClient(
+            endpoint=ENDPOINT,
+            credential=DefaultAzureCredential(),
+        )
+        _openai_responses_client = project_client.get_openai_client()
 
-    # The local function tools must be (re-)registered on the client regardless
-    # of whether the orchestrator agent itself is freshly created or reused.
-    client.enable_auto_function_calls({get_customer_financials, ask_policy_agent})
-
-    cached_id = cache.get("orchestrator_agent_id")
-    if _agent_is_alive(client, cached_id):
-        print(f"✓ Reusing Orchestrator Agent (id: {cached_id})")
-        return client.get_agent(cached_id)
-
-    function_tool = FunctionTool({get_customer_financials, ask_policy_agent})
-
-    agent = client.create_agent(
+    response = _openai_responses_client.responses.create(
         model=ORCHESTRATOR_MODEL,
-        name=ORCHESTRATOR_AGENT_NAME,
-        instructions=ORCHESTRATOR_INSTRUCTIONS,
-        tools=list(function_tool.definitions),
+        input=f"{ORCHESTRATOR_INSTRUCTIONS}\n\nCURRENT APPLICATION TASK:\n{message}",
     )
-    cache["orchestrator_agent_id"] = agent.id
-    _save_cache(cache)
-    print(f"✓ Orchestrator Agent created (id: {agent.id})")
-    return agent
+    if not response.output_text:
+        raise RuntimeError("The Orchestrator deployment returned an empty response.")
+    return response.output_text
 
 
 @dataclass
@@ -327,7 +315,6 @@ class SmartLoanAgents:
     """Bundle of the 3 live agents plus convenience methods to talk to them."""
 
     client: AgentsClient
-    orchestrator: Agent
     policy_agent: Agent
     fast_router: Agent
 
@@ -362,34 +349,14 @@ class SmartLoanAgents:
 
     def ask(self, thread_id: Optional[str], message: str) -> Tuple[str, str]:
         """
-        Send a message to the Orchestrator Agent on the given thread (creating a
-        new one if `thread_id` is None), and return (response_text, thread_id).
+        Call the Orchestrator deployment through the Responses API.
+
+        Prompt Agents automatically persist ``top_p=1.0``, which gpt-5.6-sol
+        rejects. The direct deployment call omits that unsupported parameter.
+        Conversation context is supplied by the Streamlit application.
         """
-        if not thread_id:
-            thread = self.client.threads.create()
-            thread_id = thread.id
-            print(f"🧵 New thread started: {thread_id}")
-
-        self.client.messages.create(thread_id=thread_id, role="user", content=message)
-
-        print(f"🚀 Running Orchestrator on thread {thread_id}...")
-        run = self.client.runs.create_and_process(
-            thread_id=thread_id, agent_id=self.orchestrator.id
-        )
-
-        if run.status == "failed":
-            print(f"❌ Run failed: {run.last_error}")
-            raise RuntimeError(f"Agent run failed: {run.last_error}")
-
-        self._print_tool_trace(thread_id, run.id)
-
-        for msg in self.client.messages.list(thread_id=thread_id):
-            if msg.role == "assistant":
-                for item in msg.content:
-                    if hasattr(item, "text"):
-                        return item.text.value, thread_id
-
-        return "Sorry, I couldn't generate a response.", thread_id
+        print(f"🚀 Running {ORCHESTRATOR_MODEL} through the Responses API...")
+        return ask_orchestrator(message), thread_id or "responses-api"
 
     def _print_tool_trace(self, thread_id: str, run_id: str) -> None:
         """Print a readable trace of every tool/sub-agent call made during the run."""
@@ -448,17 +415,17 @@ def _describe_tool_call(call: Any) -> str:
 
 
 def get_or_create_agents() -> SmartLoanAgents:
-    """Main entry point: connect to Azure AI Foundry and make sure all 3 agents exist."""
+    """Connect to Foundry and initialize the router, policy RAG, and GPT client."""
     client = get_agents_client()
     cache = _load_cache()
 
     policy_agent = _ensure_policy_agent(client, cache)
     fast_router = _ensure_fast_router_agent(client, cache)
-    orchestrator = _ensure_orchestrator_agent(client, cache, policy_agent)
+    _policy_agent_ref["client"] = client
+    _policy_agent_ref["agent_id"] = policy_agent.id
 
     return SmartLoanAgents(
         client=client,
-        orchestrator=orchestrator,
         policy_agent=policy_agent,
         fast_router=fast_router,
     )
@@ -476,5 +443,5 @@ if __name__ == "__main__":
     print(agents.route("Can I get a mortgage?"))
 
     print("\n--- Orchestrator: full flow ---")
-    reply, thread_id = agents.ask(None, "Can I get a mortgage? My Telegram ID is 100001.")
+    reply, thread_id = agents.ask(None, "Summarize a preliminary mortgage assessment.")
     print(f"\n🤖 {reply}")

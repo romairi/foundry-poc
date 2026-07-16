@@ -53,6 +53,11 @@ def _load_dataframe(force_reload: bool = False) -> pd.DataFrame:
     return _dataframe
 
 
+def load_clients_database(force_reload: bool = False) -> pd.DataFrame:
+    """Return a copy of the normalized client table for trusted application UI code."""
+    return _load_dataframe(force_reload=force_reload).copy()
+
+
 def get_customer_financials(telegram_id: str) -> dict:
     """
     Look up a customer's financial profile by their Telegram ID.
