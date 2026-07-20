@@ -1,4 +1,10 @@
-azure-ai-projects
-azure-identity
 python-dotenv
-azure-core
+google-genai
+
+# Foundry external-agent tracing (exact path from portal docs)
+microsoft-opentelemetry[langchain]
+langchain-google-genai
+
+# Register external agent in Foundry (register_external_agent.py)
+azure-ai-projects>=2.3.0
+azure-identity>=1.17.0
