@@ -8,6 +8,7 @@ Docs: https://learn.microsoft.com/azure/foundry/agents/how-to/register-external-
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -67,19 +68,28 @@ use_microsoft_opentelemetry(
 )
 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 llm = ChatGoogleGenerativeAI(
     model=GEMINI_MODEL,
     google_api_key=GEMINI_API_KEY,
 )
+tracer = trace.get_tracer(__name__)
 
 
-def run_external_agent(user_prompt: str) -> str:
-    """Run one LangChain Gemini call (auto-traced by microsoft-opentelemetry)."""
-    result = llm.invoke(user_prompt)
-    content = getattr(result, "content", result)
+def _messages_json(role: str, text: str, *, finish_reason: str | None = None) -> str:
+    """Foundry queries gen_ai.input.messages / gen_ai.output.messages JSON."""
+    item: dict = {
+        "role": role,
+        "parts": [{"type": "text", "content": text}],
+    }
+    if finish_reason:
+        item["finish_reason"] = finish_reason
+    return json.dumps([item], ensure_ascii=False)
+
+
+def _normalize_content(content) -> str:
     if isinstance(content, list):
-        # Some LC message formats return a list of content blocks
         parts = []
         for block in content:
             if isinstance(block, dict) and "text" in block:
@@ -88,6 +98,43 @@ def run_external_agent(user_prompt: str) -> str:
                 parts.append(str(block))
         return "".join(parts).strip()
     return str(content).strip()
+
+
+def run_external_agent(user_prompt: str) -> str:
+    """
+    LangChain Gemini call nested under invoke_agent.
+
+    Foundry Traces filters by gen_ai.agent.id == OTEL_AGENT_ID.
+    ChatGoogleGenerativeAI.invoke() is a chat model, not a LangChain Agent,
+    so we set gen_ai.agent.id on a parent span ourselves.
+    """
+    with tracer.start_as_current_span(
+        "invoke_agent",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.id": OTEL_AGENT_ID,
+            "gen_ai.agent.name": AGENT_NAME,
+            "gen_ai.system": "google_genai",
+            "gen_ai.input.messages": _messages_json("user", user_prompt),
+        },
+    ) as root_span:
+        try:
+            result = llm.invoke(user_prompt)
+            answer = _normalize_content(getattr(result, "content", result))
+        except Exception as exc:
+            root_span.record_exception(exc)
+            root_span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
+
+        root_span.set_attribute(
+            "gen_ai.output.messages",
+            _messages_json("assistant", answer, finish_reason="stop"),
+        )
+        span_ctx = root_span.get_span_context()
+        if span_ctx.is_valid:
+            print(f"trace_id={format(span_ctx.trace_id, '032x')}")
+        return answer
 
 
 def _flush_telemetry() -> bool:
