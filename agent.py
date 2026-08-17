@@ -1,131 +1,106 @@
-"""
-External Gemini agent for Microsoft Foundry observability.
-
-Foundry matches traces by gen_ai.agent.id == OTEL_AGENT_ID.
-"""
+"""יועץ הלוואות חכם: מאגר מדומה + Microsoft Foundry (gpt-5-mini)."""
 
 from __future__ import annotations
 
 import json
 import os
-import sys
+import re
+from typing import Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-os.environ.setdefault("AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING", "true")
-os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental")
-os.environ.setdefault(
-    "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "SPAN_AND_EVENT"
+from data.mock_loans import (
+    evaluate_loan,
+    get_loan_by_client_id,
+    search_loans_by_name,
 )
+from prompts.agent_prompts import SYSTEM_PROMPT, format_loan_card
 
-CONNECTION_STRING = (
-    os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
-    or os.getenv("AZURE_CONNECTION_STRING")
+FOUNDRY_PROJECT_ENDPOINT = (
+    os.getenv("FOUNDRY_PROJECT_ENDPOINT")
+    or os.getenv("AZURE_AI_PROJECT_ENDPOINT")
 )
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-AGENT_NAME = os.getenv("AGENT_NAME", "gemini-governance-agent")
-OTEL_AGENT_ID = os.getenv("OTEL_AGENT_ID", f"{AGENT_NAME}-v1")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+MODEL_DEPLOYMENT_NAME = os.getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME", "gpt-5-mini")
+AGENT_NAME = os.getenv("AGENT_NAME", "hebrew-loan-advisor")
+
+_CLIENT_ID_RE = re.compile(r"\bIL-\d{4}\b", re.IGNORECASE)
+_openai_client = None
 
 
-def _require_env() -> None:
-    missing = [
-        name
-        for name, value in (
-            ("APPLICATIONINSIGHTS_CONNECTION_STRING", CONNECTION_STRING),
-            ("GEMINI_API_KEY", GEMINI_API_KEY),
+def _collect_context(user_prompt: str) -> dict[str, Any]:
+    ids = _CLIENT_ID_RE.findall(user_prompt or "")
+    records = []
+    for cid in ids:
+        row = get_loan_by_client_id(cid)
+        if row:
+            records.append(row)
+    if not records:
+        records = search_loans_by_name(user_prompt)
+    evaluations = [evaluate_loan(r) for r in records]
+    return {"records": records, "evaluations": evaluations}
+
+
+def _fallback_hebrew_reply(ctx: dict[str, Any]) -> str:
+    records = ctx["records"]
+    if not records:
+        return (
+            "לא מצאתי לקוח מתאים במאגר. "
+            "אפשר לציין מספר לקוח (למשל IL-1001) או שם מלא כמו דוד כהן."
         )
-        if not value or str(value).startswith("YOUR_")
-    ]
-    if missing:
-        print("Error: set real values in .env for: " + ", ".join(missing))
-        sys.exit(1)
+    parts = ["להלן ממצאי המערכת (החלטה סופית בידי הבנקאי):"]
+    for rec, ev in zip(records, ctx["evaluations"], strict=False):
+        parts.append(format_loan_card(rec))
+        parts.append(f"המלצת מערכת: {ev['המלצת_מערכת']}. {ev['נימוק']}")
+    return "\n\n".join(parts)
 
 
-_require_env()
+def _get_foundry_openai():
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+    if not FOUNDRY_PROJECT_ENDPOINT:
+        raise RuntimeError("FOUNDRY_PROJECT_ENDPOINT is not set")
+    from azure.identity import DefaultAzureCredential
+    from azure.ai.projects import AIProjectClient
 
-from microsoft.opentelemetry import use_microsoft_opentelemetry
-from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
-
-use_microsoft_opentelemetry(
-    enable_azure_monitor=True,
-    azure_monitor_connection_string=CONNECTION_STRING,
-    sampling_ratio=1.0,
-    enable_sensitive_data=True,
-    instrumentation_options={
-        "langchain": {
-            "enabled": True,
-            "agent_id": OTEL_AGENT_ID,
-            "agent_name": AGENT_NAME,
-        },
-    },
-)
-
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GEMINI_API_KEY,
-)
-tracer = trace.get_tracer(__name__)
+    project = AIProjectClient(
+        endpoint=FOUNDRY_PROJECT_ENDPOINT,
+        credential=DefaultAzureCredential(),
+    )
+    _openai_client = project.get_openai_client()
+    return _openai_client
 
 
-def _messages_json(role: str, text: str, *, finish_reason: str | None = None) -> str:
-    item: dict = {
-        "role": role,
-        "parts": [{"type": "text", "content": text}],
+def _call_foundry(user_prompt: str, ctx: dict[str, Any]) -> str:
+    payload = {
+        "שאלה_המשתמש": user_prompt,
+        "רשומות_מהמאגר": ctx["records"],
+        "הערכת_מערכת": ctx["evaluations"],
     }
-    if finish_reason:
-        item["finish_reason"] = finish_reason
-    return json.dumps([item], ensure_ascii=False)
-
-
-def _normalize_content(content) -> str:
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and "text" in block:
-                parts.append(str(block["text"]))
-            else:
-                parts.append(str(block))
-        return "".join(parts).strip()
-    return str(content).strip()
+    user_content = (
+        "נתוני מאגר (JSON):\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n\nענה בעברית מקצועית על סמך הנתונים בלבד."
+    )
+    client = _get_foundry_openai()
+    completion = client.chat.completions.create(
+        model=MODEL_DEPLOYMENT_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    return (completion.choices[0].message.content or "").strip()
 
 
 def run_external_agent(user_prompt: str) -> str:
-    """Call Gemini and emit a Foundry-visible invoke_agent span."""
-    with tracer.start_as_current_span(
-        "invoke_agent",
-        kind=SpanKind.INTERNAL,
-        attributes={
-            "gen_ai.operation.name": "invoke_agent",
-            "gen_ai.agent.id": OTEL_AGENT_ID,
-            "gen_ai.agent.name": AGENT_NAME,
-            "gen_ai.system": "google_genai",
-            "gen_ai.input.messages": _messages_json("user", user_prompt),
-        },
-    ) as root_span:
-        try:
-            result = llm.invoke(user_prompt)
-            answer = _normalize_content(getattr(result, "content", result))
-        except Exception as exc:
-            root_span.record_exception(exc)
-            root_span.set_status(Status(StatusCode.ERROR, str(exc)))
-            raise
-
-        root_span.set_attribute(
-            "gen_ai.output.messages",
-            _messages_json("assistant", answer, finish_reason="stop"),
-        )
-        return answer
-
-
-def flush_telemetry(timeout_millis: int = 30_000) -> bool:
-    provider = trace.get_tracer_provider()
-    force_flush = getattr(provider, "force_flush", None)
-    if not callable(force_flush):
-        return False
-    return bool(force_flush(timeout_millis=timeout_millis))
+    """תשובה בעברית דרך gpt-5-mini ב-Foundry."""
+    ctx = _collect_context(user_prompt)
+    try:
+        text = _call_foundry(user_prompt, ctx)
+        return text or _fallback_hebrew_reply(ctx)
+    except Exception:
+        # Local/dev without az login still returns Hebrew from mock rules.
+        return _fallback_hebrew_reply(ctx)

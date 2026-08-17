@@ -1,0 +1,48 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: blue
+endpoint_name: hebrew-loan-agent
+app_insights_enabled: true
+instance_type: Standard_DS2_v2
+instance_count: 1
+environment_variables:
+  PORT: "8000"
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  PYTHONIOENCODING: utf-8
+  AGENT_NAME: hebrew-loan-advisor
+  AZURE_AI_MODEL_DEPLOYMENT_NAME: gpt-5-mini
+  FOUNDRY_PROJECT_ENDPOINT: https://roie-demo-resource.services.ai.azure.com/api/projects/roie-demo
+environment:
+  image: ${AZURE_ACR_LOGIN_SERVER}/hebrew-loan-agent:latest
+  inference_config:
+    liveness_route:
+      port: 8000
+      path: /health
+    readiness_route:
+      port: 8000
+      path: /health
+    scoring_route:
+      port: 8000
+      path: /score
+request_settings:
+  request_timeout_ms: 60000
+  max_concurrent_requests_per_instance: 8
+liveness_probe:
+  initial_delay: 10
+  period: 20
+  timeout: 5
+  failure_threshold: 3
+  success_threshold: 1
+readiness_probe:
+  initial_delay: 10
+  period: 10
+  timeout: 5
+  failure_threshold: 3
+  success_threshold: 1
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi

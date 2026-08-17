@@ -1,0 +1,57 @@
+[
+  {
+    "client_id": "IL-1001",
+    "client_name": "דוד כהן",
+    "requested_amount": 180000,
+    "purpose": "שיפוץ דירה",
+    "status": "בבדיקה",
+    "monthly_income": 18500,
+    "credit_score": 712,
+    "city": "תל אביב",
+    "id_number_last4": "4581"
+  },
+  {
+    "client_id": "IL-1002",
+    "client_name": "מיכל לוי",
+    "requested_amount": 95000,
+    "purpose": "רכישת רכב",
+    "status": "אושר",
+    "monthly_income": 14200,
+    "credit_score": 768,
+    "city": "חיפה",
+    "id_number_last4": "9023"
+  },
+  {
+    "client_id": "IL-1003",
+    "client_name": "יוסי מזרחי",
+    "requested_amount": 420000,
+    "purpose": "רכישת דירה",
+    "status": "נדחה",
+    "monthly_income": 9800,
+    "credit_score": 541,
+    "city": "באר שבע",
+    "id_number_last4": "1176"
+  },
+  {
+    "client_id": "IL-1004",
+    "client_name": "נועה אברהם",
+    "requested_amount": 22000,
+    "purpose": "חופשה",
+    "status": "אושר",
+    "monthly_income": 12100,
+    "credit_score": 801,
+    "city": "ירושלים",
+    "id_number_last4": "3308"
+  },
+  {
+    "client_id": "IL-1005",
+    "client_name": "אביגיל פרץ",
+    "requested_amount": 260000,
+    "purpose": "איחוד הלוואות",
+    "status": "בבדיקה",
+    "monthly_income": 11000,
+    "credit_score": 634,
+    "city": "ראשון לציון",
+    "id_number_last4": "7742"
+  }
+]

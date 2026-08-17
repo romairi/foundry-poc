@@ -1,13 +1,7 @@
 python-dotenv
-google-genai
 fastapi
 uvicorn[standard]
 pydantic
-
-# Foundry external-agent tracing
-microsoft-opentelemetry[langchain]
-langchain-google-genai
-
-# Register external agent in Foundry (register_external_agent.py)
-azure-ai-projects>=2.3.0
-azure-identity>=1.17.0
+azure-identity
+azure-ai-projects
+openai

@@ -1,0 +1,7 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+name: hebrew-loan-agent
+auth_mode: key
+description: Hebrew loan-advisor custom container (Foundry / Azure ML online endpoint)
+tags:
+  language: he
+  agent: hebrew-loan-advisor
