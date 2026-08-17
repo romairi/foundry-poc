@@ -1,7 +1,10 @@
 python-dotenv
 google-genai
+fastapi
+uvicorn[standard]
+pydantic
 
-# Foundry external-agent tracing (exact path from portal docs)
+# Foundry external-agent tracing
 microsoft-opentelemetry[langchain]
 langchain-google-genai
 
